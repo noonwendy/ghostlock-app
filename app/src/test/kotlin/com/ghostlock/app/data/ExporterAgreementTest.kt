@@ -35,18 +35,6 @@ class ExporterAgreementTest {
             exporterDir.isDirectory,
         )
 
-        val index = HoconSupport.parseValue(
-            AssetConfigLoader(context).load("kernel_profiles/index.conf"),
-        ).asValueMap() ?: error("index.conf is not an object")
-        val expected = index["profiles"].asValueList().orEmpty()
-            .mapNotNull { it.asValueMap() }
-            .mapNotNull { it["release"] as? String }
-            .filterNot { it.endsWith("-template") }
-            .toSortedSet()
-        val actual = exporterDir.listFiles { file -> file.isFile && file.name.endsWith(".bin") }
-            .orEmpty().map { it.name.removeSuffix(".bin") }.toSortedSet()
-        assertEquals("exported set must match the index (excluding templates)", expected, actual)
-
         val root = Files.createTempDirectory("exporter-agreement").toFile()
         try {
             val controller = AndroidProfileConfigController(
@@ -59,6 +47,21 @@ class ExporterAgreementTest {
                 preferences = context.getSharedPreferences("exporter-agreement", 0)
                     .also { it.edit().clear().commit() },
             )
+            val index = HoconSupport.parseValue(
+                AssetConfigLoader(context).load("kernel_profiles/index.conf"),
+            ).asValueMap() ?: error("index.conf is not an object")
+            /* Only the native engine produces a GLK1 document; a specialized
+             * engine ships its own payload and exports no .bin. */
+            val expected = index["profiles"].asValueList().orEmpty()
+                .mapNotNull { it.asValueMap() }
+                .mapNotNull { it["release"] as? String }
+                .filterNot { it.endsWith("-template") }
+                .filter { controller.load(it, pair).usesNativeEngine }
+                .toSortedSet()
+            val actual = exporterDir.listFiles { file -> file.isFile && file.name.endsWith(".bin") }
+                .orEmpty().map { it.name.removeSuffix(".bin") }.toSortedSet()
+            assertEquals("exported set must match the index (excluding templates)", expected, actual)
+
             for (release in expected) {
                 val appBytes = controller.nativeDocument(controller.load(release, pair))
                 assertNotNull("$release: app has no native document", appBytes)

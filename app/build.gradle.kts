@@ -160,6 +160,17 @@ kotlin {
 // The exporter-agreement test compares against the freshly exported .bin set.
 tasks.withType<Test>().configureEach {
     dependsOn(":profile-core:exportKernelProfiles")
+    // The H80GT payload tests read the staged assets, so stage and verify them
+    // (against payloads.conf) before any unit test runs.
+    dependsOn(project(":profile-core").tasks.named("verifyH80gtPayload"))
+}
+
+/* The specialized payload is staged from the pinned release bundle before the
+ * assets are merged into the APK. */
+tasks.matching { task ->
+    task.name.startsWith("merge") && task.name.endsWith("Assets")
+}.configureEach {
+    dependsOn(rootProject.tasks.named("prepareH80gtPayload"))
 }
 
 tasks.named("preBuild") {

@@ -64,6 +64,7 @@ build/extract/release/ghostlock-extract OTA.zip --format conf --out profile.conf
 ## 参考
 
 - [Profile 结构](docs/kernel_profiles/PROFILE_SCHEMA_ZH.md)与[执行默认值](docs/kernel_profiles/defaults_ZH.md)
+- [荣耀 80 GT 专用引擎](docs/h80gt-integration_ZH.md)（`engine = "h80gt"`，6 个 H80GT 已验证固件）、其[设计](docs/analysis/h80gt-integration-plan_ZH.md)与[发布说明](docs/h80gt-release-notes_ZH.md)
 - [原生核心](src/core/README_ZH.md)
 - [新增组件](docs/development/adding-a-component_ZH.md)、[工程规范](docs/development/engineering-standards_ZH.md)和[文档规范](docs/development/documentation-standards_ZH.md)
 
@@ -74,3 +75,6 @@ build/extract/release/ghostlock-extract OTA.zip --format conf --out profile.conf
 - [NebuSec/CyberMeowfia](https://github.com/NebuSec/CyberMeowfia)
 - [JoinChang/ghostlock-oneplus](https://github.com/JoinChang/ghostlock-oneplus)
 - [x-spy/CVE-2026-43499-popsicle](https://github.com/x-spy/CVE-2026-43499-popsicle)
+- [yakidango-official/GhostLock-H80GT](https://github.com/yakidango-official/GhostLock-H80GT) — H80GT exploit 与 target offsets（Apache-2.0），改动见 [NOTICE.md](NOTICE.md)
+
+第三方归属、许可证与改动列表见 [NOTICE.md](NOTICE.md)。

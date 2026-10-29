@@ -2,9 +2,12 @@ package com.ghostlock.app.shizuku
 
 import android.content.Context
 import android.os.Process
+import android.os.SystemClock
 import androidx.annotation.Keep
 import com.ghostlock.app.data.ManagerScanner
 import com.ghostlock.app.data.NativeProfileDocument
+import com.ghostlock.app.data.h80gt.H80gtBootClock
+import com.ghostlock.app.data.h80gt.H80gtExecutor
 import java.io.File
 import java.io.RandomAccessFile
 import java.util.concurrent.atomic.AtomicBoolean
@@ -163,6 +166,63 @@ class GhostlockUserService(private val context: Context) : IGhostlockUserService
             running.set(false)
             runCatching { callback.onComplete(exitCode) }
         }, "ghostlock-shizuku-runner").start()
+    }
+
+    /**
+     * Specialized H80GT chain. Everything it needs is read from the same APK
+     * the service runs from, re-verified here, and staged into a fresh
+     * `/data/local/tmp/ksu_run_<stamp>` directory by [H80gtExecutor].
+     */
+    override fun runH80gt(
+        payloadId: String,
+        managerPackage: String?,
+        callback: IGhostlockCallback,
+        statusCallback: IGhostlockStatusCallback,
+    ) {
+        if (!running.compareAndSet(false, true)) {
+            callback.onLog("<s> error: another GhostLock process is already running")
+            callback.onComplete(1)
+            return
+        }
+        Thread({
+            val exitCode = runCatching {
+                require(Process.myUid() == Process.SHELL_UID) {
+                    "Shizuku UserService uid=${Process.myUid()}, expected ${Process.SHELL_UID}"
+                }
+                val status = File("/proc/self/status").readText()
+                require(Regex("(?m)^Seccomp:\\s*0$").containsMatchIn(status)) {
+                    "Shizuku UserService is still seccomp-filtered"
+                }
+                val apk = File(context.applicationInfo.sourceDir)
+                require(apk.isFile) { "missing APK: ${apk.absolutePath}" }
+                callback.onLog("<b> H80GT chain: payload=$payloadId")
+                callback.onLog("<s> Shizuku ready: uid=${Process.myUid()} Seccomp=0")
+                val executor = H80gtExecutor(
+                    apk = apk,
+                    payloadId = payloadId,
+                    selectedManager = managerPackage,
+                    log = { line -> runCatching { callback.onLog(line) } },
+                    status = { stage, stageStatus ->
+                        runCatching { statusCallback.onStatus(stage, stageStatus) }
+                    },
+                )
+                val bootInstant = H80gtBootClock.bootInstant(
+                    System.currentTimeMillis(),
+                    SystemClock.elapsedRealtime(),
+                )
+                val result = executor.run(bootInstant)
+                callback.onLog(
+                    "<b> H80GT result: ${result.outcome.token} " +
+                        "stage=${result.failedStage?.token ?: "-"} reboot=${result.needsReboot}",
+                )
+                result.exitCode
+            }.getOrElse { error ->
+                runCatching { callback.onLog("<s> error: ${error.message}") }
+                1
+            }
+            running.set(false)
+            runCatching { callback.onComplete(exitCode) }
+        }, "ghostlock-h80gt-runner").start()
     }
 
     /** Forward complete native log lines without ever blocking the native

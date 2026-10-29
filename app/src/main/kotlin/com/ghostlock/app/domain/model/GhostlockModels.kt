@@ -1,5 +1,7 @@
 package com.ghostlock.app.domain.model
 
+import com.ghostlock.app.data.profile.H80gtSpec
+
 data class CpuPair(val primary: Int, val consumer: Int) {
     override fun toString(): String = "$primary,$consumer"
 }
@@ -81,7 +83,13 @@ data class ProfileConfig(
     val fallbackTo: String? = null,
     /** Dotted paths whose resolved value violates the geometry rules. */
     val invalidPaths: Set<String> = emptySet(),
+    /** Execution engine token: `native` (default) or `h80gt`. */
+    val engine: String = "native",
+    /** Exact target of a specialized engine; null for the native engine. */
+    val h80gt: H80gtSpec? = null,
 ) {
+    val usesNativeEngine: Boolean get() = engine == "native"
+
     companion object {
         /** Routes a profile may declare ("" is the inference fallback). */
         val Routes = listOf("tcp_zerocopy", "select_stack", "multicast_waiter")

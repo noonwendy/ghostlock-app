@@ -60,6 +60,17 @@ object ProfileExporter {
             val parsed = parseFile(File(srcDir, file), srcDir) ?: error("cannot parse $file")
             val actualRelease = parsed["release"] as? String ?: error("$file has no release")
             require(actualRelease == release) { "index/file release mismatch for $file" }
+            /* Only the native engine produces a GLK1 document. A specialized
+             * engine ships its own payload and consumes no .bin; exporting one
+             * would be a fake document nobody may send to native. */
+            val engine = ProfileResolver.executionEngine(parsed) ?: ExecutionEngine.NATIVE
+            if (!engine.isNative) {
+                println(
+                    "exportKernelProfiles: $actualRelease uses engine=${engine.token}; " +
+                        "no GLK1 document is exported",
+                )
+                continue
+            }
             val route = routeNameOf(parsed, routes)
             val fallbackTo = fallbackOf(parsed)
             val merged = ProfileMerger.resolveMerged(

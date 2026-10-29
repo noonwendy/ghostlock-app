@@ -36,3 +36,23 @@ tasks.register<JavaExec>("exportKernelProfiles") {
         outputDir.get().asFile.absolutePath,
     )
 }
+
+/**
+ * Verifies the staged H80GT payload against `assets/h80gt/payloads.conf` with
+ * the same parser the app and the Shizuku UserService use. It runs the staging
+ * task first, so a stale, truncated or missing bundle fails the build instead
+ * of producing an APK whose every run would be refused at preflight.
+ */
+tasks.register<JavaExec>("verifyH80gtPayload") {
+    description = "Verify the staged H80GT payload (size + SHA-256) against payloads.conf"
+    group = "verification"
+    val assetsDir = rootProject.layout.projectDirectory.dir("app/src/main/assets")
+    val allowMissing = (rootProject.findProperty("ghostlock.h80gt") as String?)
+        ?.equals("off", ignoreCase = true) == true
+    dependsOn(rootProject.tasks.named("prepareH80gtPayload"))
+    inputs.dir(assetsDir.dir("h80gt"))
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass.set("com.ghostlock.app.data.h80gt.H80gtPayloadVerifier")
+    args(assetsDir.asFile.absolutePath)
+    if (allowMissing) args("--allow-missing")
+}

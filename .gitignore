@@ -16,6 +16,11 @@ __pycache__
 target/
 *.jks
 *.keystore
+# H80GT payload: staged from the pinned release bundle by
+# `prepareH80gtPayload`, verified by `verifyH80gtPayload`, never committed.
+app/src/main/assets/h80gt/payload/
+app/src/main/assets/h80gt/shared/
+app/src/main/assets/h80gt/ksu_loader.tmpl
 /.codex/
 /src/.codex/config.toml
 /ghostlock *

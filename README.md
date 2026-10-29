@@ -64,6 +64,7 @@ Import `profile.conf` in the app. Omit `--xbl-config` if you do not have that im
 ## Reference
 
 - [Profile schema](docs/kernel_profiles/PROFILE_SCHEMA.md) and [execution defaults](docs/kernel_profiles/defaults.md)
+- [HONOR 80 GT specialized engine](docs/h80gt-integration.md) (`engine = "h80gt"`, six H80GT-verified firmwares), its [design](docs/analysis/h80gt-integration-plan.md) and [release notes](docs/h80gt-release-notes.md)
 - [Native core](src/core/README.md)
 - [Add a component](docs/development/adding-a-component.md), [engineering rules](docs/development/engineering-standards.md), and [writing rules](docs/development/documentation-standards.md)
 
@@ -74,3 +75,6 @@ Licensed under [Apache License 2.0](LICENSE). Based on:
 - [NebuSec/CyberMeowfia](https://github.com/NebuSec/CyberMeowfia)
 - [JoinChang/ghostlock-oneplus](https://github.com/JoinChang/ghostlock-oneplus)
 - [x-spy/CVE-2026-43499-popsicle](https://github.com/x-spy/CVE-2026-43499-popsicle)
+- [yakidango-official/GhostLock-H80GT](https://github.com/yakidango-official/GhostLock-H80GT) — H80GT exploit and target offsets (Apache-2.0), modified as described in [NOTICE.md](NOTICE.md)
+
+Third-party attribution, licenses and the list of modifications are in [NOTICE.md](NOTICE.md).

@@ -1,6 +1,9 @@
 package com.ghostlock.app.domain.repository
 
 import com.ghostlock.app.data.ManagerScanner
+import com.ghostlock.app.data.h80gt.H80gtManager
+import com.ghostlock.app.data.h80gt.H80gtRunRecord
+import com.ghostlock.app.data.h80gt.H80gtVerdict
 import com.ghostlock.app.domain.model.CpuPair
 import com.ghostlock.app.domain.model.DebugSettings
 import com.ghostlock.app.domain.model.KernelSnapshot
@@ -120,6 +123,22 @@ interface GhostlockRepository {
     suspend fun runExploit(pair: CpuPair, onLog: (String) -> Unit): Int
 
     suspend fun runExploitWithShizuku(pair: CpuPair, onLog: (String) -> Unit): Int
+
+    /**
+     * App-side preflight for a specialized engine, or null when the active
+     * profile uses the native engine. Blockers are shown before anything runs;
+     * the Shizuku service repeats the check as the authoritative side.
+     */
+    suspend fun h80gtPreflight(): H80gtVerdict?
+
+    /** Last specialized run, or null when none was ever started. */
+    suspend fun lastH80gtRun(): H80gtRunRecord?
+
+    /** Live stage events of the running specialized chain. */
+    fun setH80gtStageListener(listener: ((stage: String, status: String) -> Unit)?)
+
+    /** Consumes the handoff decision produced by the last successful run. */
+    fun consumeH80gtHandoff(): H80gtManager.Decision?
 
     /**
      * The step left `in_progress` by the previous run (usually a kernel panic),

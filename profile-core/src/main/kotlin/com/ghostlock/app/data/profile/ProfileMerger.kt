@@ -29,8 +29,11 @@ object ProfileMerger {
         pair: CpuPairView,
         routePresets: Map<String, ValueMap>,
     ): ValueMap {
+        /* The engine decides what the document means: a non-native engine has
+         * no native tuning, no CPU pair and no route branches. */
+        val engine = engineOf(builtin, imported, overrides)
         val defaults = valueMapOf("release" to deviceRelease).apply {
-            if (tuningExecution != null) put("execution", tuningExecution)
+            if (engine.isNative && tuningExecution != null) put("execution", tuningExecution)
         }
         val resolved = mergeSource(
             mergeSource(
@@ -41,11 +44,19 @@ object ProfileMerger {
         )
         resolved["schema_version"] = 1
         resolved["release"] = deviceRelease
-        applySelectedCpus(resolved, pair)
-        fillRouteExecutionDefaults(resolved, routePresets)
-        validateResolved(resolved, deviceRelease)
+        if (engine.isNative) {
+            applySelectedCpus(resolved, pair)
+            fillRouteExecutionDefaults(resolved, routePresets)
+        }
+        validateResolved(resolved, deviceRelease, engine)
         return resolved
     }
+
+    /** First source declaring an engine wins; unknown tokens fall back to native (and fail validation). */
+    private fun engineOf(vararg sources: Map<String, Any?>?): ExecutionEngine =
+        sources.firstNotNullOfOrNull { source ->
+            (source?.get(ExecutionEngine.Key) as? String)?.let(ExecutionEngine::fromToken)
+        } ?: ExecutionEngine.NATIVE
 
     private fun applySelectedCpus(resolved: ValueMap, pair: CpuPairView) {
         resolved.mutableChild("execution")["selected_cpus"] = valueMapOf(
@@ -111,10 +122,14 @@ object ProfileMerger {
         return merged
     }
 
-    private fun validateResolved(profile: ValueMap, release: String) {
+    private fun validateResolved(
+        profile: ValueMap,
+        release: String,
+        engine: ExecutionEngine,
+    ) {
         require(profile["release"] == release) { "profile release mismatch" }
         require((profile["kernel_major"] as? Number)?.toInt() in 5..6) { "invalid kernel_major" }
-        require(profile.containsKey("execution")) { "missing execution tuning" }
+        if (engine.isNative) require(profile.containsKey("execution")) { "missing execution tuning" }
     }
 }
 

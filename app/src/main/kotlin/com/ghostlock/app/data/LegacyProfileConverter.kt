@@ -1,5 +1,7 @@
 package com.ghostlock.app.data
 
+import com.ghostlock.app.data.profile.ProfileResolver
+
 /**
  * Converts remote/main-era offsets.json entries into the current layout.
  *
@@ -93,6 +95,10 @@ internal object LegacyProfileConverter {
 
     fun convertValue(entry: ValueMap?): ValueMap? {
         if (entry == null) return null
+        /* A specialized engine carries no native geometry: inferring a route or
+         * seeding credential defaults would fabricate fields the chain must not
+         * have, and validation rejects them. The document is already current. */
+        if (ProfileResolver.executionEngine(entry)?.isNative == false) return entry
         /* The bundled extractor still emits v1 reports, which carry no
          * schema_version; every such document is normalised and seeded. A v2
          * profile carries schema_version and is only normalised in place, so an

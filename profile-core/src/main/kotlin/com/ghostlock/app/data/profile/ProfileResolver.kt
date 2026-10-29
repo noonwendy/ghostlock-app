@@ -13,9 +13,15 @@ object ProfileResolver {
         "release", "schema_version", "kernel_major", "recommend_shizuku",
         "route", "fallback", "kernelsnitch", "task_struct", "cred", "offset",
         "kernel_phys_load", "kernel_phys_offset", "execution",
+        ExecutionEngine.Key, ExecutionEngine.Section,
     )
     private val RequiredTopLevel = setOf(
         "release", "schema_version", "kernel_major", "route", "task_struct", "cred", "offset",
+    )
+    /** Keys that belong to the native wire document and must not appear next to an engine. */
+    private val NativeOnlyTopLevel = listOf(
+        "route", "fallback", "kernelsnitch", "task_struct", "cred", "offset",
+        "kernel_phys_load", "kernel_phys_offset", "execution",
     )
     private val RequiredTaskStruct = listOf(
         "prio", "normal_prio", "sched_task_group", "pi_lock", "pi_waiters", "pi_top_task",
@@ -71,6 +77,21 @@ object ProfileResolver {
         return profile.getLongAt(path)
     }
 
+    /**
+     * The declared engine, or null when the value is present but not a known
+     * token. An absent key means [ExecutionEngine.NATIVE].
+     */
+    fun executionEngine(profile: Map<String, Any?>): ExecutionEngine? =
+        when (val raw = profile[ExecutionEngine.Key]) {
+            null -> ExecutionEngine.NATIVE
+            is String -> ExecutionEngine.fromToken(raw)
+            else -> null
+        }
+
+    /** Tolerant read of the `h80gt` section; null when it is absent or incomplete. */
+    fun h80gtSpec(profile: Map<String, Any?>): H80gtSpec? =
+        H80gtSpec.parse(profile).first
+
     /** Fail-closed structural validation of a merged profile. */
     fun validateMerged(
         profile: Map<String, Any?>,
@@ -83,6 +104,32 @@ object ProfileResolver {
                 errors += ConfigError(key, "unknown top-level key")
             }
         }
+        val rawEngine = profile[ExecutionEngine.Key]
+        val engine = executionEngine(profile)
+        if (engine == null) {
+            errors += ConfigError(
+                ExecutionEngine.Key,
+                "unknown execution engine: ${rawEngine?.toString()?.take(32)}",
+            )
+            return errors
+        }
+        if (engine == ExecutionEngine.NATIVE) {
+            if (profile.containsKey(ExecutionEngine.Section)) {
+                errors += ConfigError(ExecutionEngine.Section, "not allowed for the native engine")
+            }
+            errors += validateNative(profile, route, fallbackTo)
+        } else {
+            errors += validateH80gt(profile)
+        }
+        return errors
+    }
+
+    private fun validateNative(
+        profile: Map<String, Any?>,
+        route: String?,
+        fallbackTo: String?,
+    ): List<ConfigError> {
+        val errors = mutableListOf<ConfigError>()
         for (key in RequiredTopLevel) {
             if (!profile.containsKey(key)) {
                 errors += ConfigError(key, "missing required key")
@@ -130,6 +177,38 @@ object ProfileResolver {
                 }
             }
         }
+        return errors
+    }
+
+    /**
+     * An H80GT profile carries no native document: the offsets, the credential
+     * template and the route geometry belong to the native pipeline only. A
+     * profile that mixes both is rejected instead of silently ignoring half of
+     * itself, and the chain always needs shell identity (Shizuku).
+     */
+    private fun validateH80gt(profile: Map<String, Any?>): List<ConfigError> {
+        val errors = mutableListOf<ConfigError>()
+        for (key in NativeOnlyTopLevel) {
+            if (profile.containsKey(key)) {
+                errors += ConfigError(key, "not allowed for the h80gt engine")
+            }
+        }
+        for (key in listOf("release", "schema_version", "kernel_major")) {
+            if (!profile.containsKey(key)) errors += ConfigError(key, "missing required key")
+        }
+        if ((profile["schema_version"] as? Number)?.toInt() != 1) {
+            errors += ConfigError("schema_version", "unsupported profile schema")
+        }
+        if ((profile["kernel_major"] as? Number)?.toInt() !in 5..6) {
+            errors += ConfigError("kernel_major", "invalid kernel_major")
+        }
+        if ((profile["release"] as? String).isNullOrBlank()) {
+            errors += ConfigError("release", "missing")
+        }
+        if ((profile["recommend_shizuku"] as? Number)?.toLong() != 1L) {
+            errors += ConfigError("recommend_shizuku", "must be 1 for the h80gt engine")
+        }
+        errors += H80gtSpec.parse(profile).second
         return errors
     }
 

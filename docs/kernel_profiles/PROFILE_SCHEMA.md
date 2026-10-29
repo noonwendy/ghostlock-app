@@ -97,6 +97,49 @@ offset { init_task = 34464384, init_cred = 34538824 }
 | `fallback` | object | Fallback declaration (`to` plus an optional `route` branch); see section 3 |
 | geometry | object/int | Grouped by namespace: `task_struct` / `cred` / `offset` / `kernelsnitch`. Include every field of the active route and the shared geometry; use explicit `null` for unavailable values, never `0` as a placeholder. Omit unused route branches except a declared fallback |
 | `execution` | object | Advisory tuning. General values come from `execution-tuning.conf`, per-route values from `execution-<route>.conf`; the resolver loads both as presets, device profiles don't `include` them. Write only differences |
+| `engine` | string | Optional execution engine: `native` (default) or `h80gt`. Kotlin-only: it never enters the GLK1 document. See section 2.1 |
+| `h80gt` | object | Required when `engine = "h80gt"`; rejected otherwise. The exact target and payload of the specialized chain. See section 2.1 |
+
+### 2.1 Specialized engines (`engine` / `h80gt`)
+
+`engine` selects which implementation runs the profile. `native` keeps the GLK1 +
+`libghostlock.so` pipeline byte-identical; `h80gt` runs the HONOR 80 GT specialized chain
+(per-firmware exploit + the project's authoritative KernelSU loader) through the Shizuku
+UserService.
+
+```hocon
+release = "5.10.236-android12-9-gd671cf8c2b02"   # the only hard key
+schema_version = 1
+engine = "h80gt"
+kernel_major = 5
+recommend_shizuku = 1
+
+h80gt {
+  payload = "annap-AGT-AN00_9.0.0.230"   # id in assets/h80gt/payloads.conf
+  firmware = "9.0.0.230"
+  manager_version = "3.3.0"              # KernelSU the bundled module was built from
+  # optional refinements; shipped profiles declare neither
+  # device = "AGT-AN00"                  # Build.MODEL, compared only when present
+  # fingerprint = "<build fingerprint>"  # compared only when present
+}
+```
+
+| Rule | Result |
+|---|---|
+| `engine` absent or `native` | native rules unchanged; `h80gt` must be absent |
+| `engine` is any other token | validation error on `engine`; the run is refused |
+| `engine = "h80gt"` | `route`, `fallback`, `task_struct`, `cred`, `offset`, `kernelsnitch`, `kernel_phys_*` and `execution` must be absent; the profile produces **no** GLK1 document |
+| `engine = "h80gt"` | `payload`, `firmware` and `manager_version` are required and non-empty; `device` and `fingerprint` are optional; `recommend_shizuku` must be `1` (the chain needs the shell identity) |
+| `engine = "h80gt"` | `release` and `firmware` must match the payload entry in `assets/h80gt/payloads.conf`; a declared `device`/`fingerprint` (on either side) must match the device. A mismatch refuses the run before staging |
+
+Selection is by kernel string (`uname -r`), the same key GhostLock-H80GT uses. No serial, account or
+device-unique string is required or shipped; the optional refinements exist for users who want a
+stricter binding.
+
+The app checks the device (`uname -r`, plus the model/fingerprint only when declared), the profile and
+the payload catalogue independently, and the Shizuku service repeats the check as the authoritative
+side. The `payloads.conf` entry pins each artifact's size, SHA-256, license and source; a packaged
+byte that does not match refuses the run instead of executing.
 
 ## 3. Route mechanism
 

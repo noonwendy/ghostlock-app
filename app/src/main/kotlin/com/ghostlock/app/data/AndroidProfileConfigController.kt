@@ -5,6 +5,7 @@ import android.content.SharedPreferences
 import androidx.core.content.edit
 import androidx.core.net.toUri
 import com.ghostlock.app.data.profile.CpuPairView
+import com.ghostlock.app.data.profile.ExecutionEngine
 import com.ghostlock.app.data.profile.ProfileMerger
 import com.ghostlock.app.data.profile.ProfileResolver
 import com.ghostlock.app.data.route.RouteKind
@@ -58,25 +59,40 @@ internal class AndroidProfileConfigController(
         val baseline = resolveCurrent(deviceRelease, pair, null, includeImported = false) ?: full
         val route = routeNameOf(full)
         val fallbackTo = fallbackTargetOf(full)
-        val invalidPaths = validateProfileFields(full, route, fallbackTo) +
-            ProfileResolver.validateMerged(full, route, fallbackTo).mapTo(mutableSetOf()) { it.fieldPath }
-        /* Invalid fields missing from the resolved document still get a row,
-         * otherwise the run stays blocked with no red field to fix. */
-        materializeInvalidPaths(full, invalidPaths)
+        /* A specialized engine carries no native document: its offsets, geometry
+         * and credential template do not exist, so the native-only validation and
+         * the editor completion pass are skipped instead of inventing fields. */
+        val engine = ProfileResolver.executionEngine(full) ?: ExecutionEngine.NATIVE
+        val h80gt = if (engine.isNative) null else ProfileResolver.h80gtSpec(full)
+        val invalidPaths = if (engine.isNative) {
+            validateProfileFields(full, route, fallbackTo) +
+                ProfileResolver.validateMerged(full, route, fallbackTo)
+                    .mapTo(mutableSetOf()) { it.fieldPath }
+        } else {
+            ProfileResolver.validateMerged(full, route, fallbackTo)
+                .mapTo(mutableSetOf()) { it.fieldPath }
+        }
+        if (engine.isNative) {
+            /* Invalid fields missing from the resolved document still get a row,
+             * otherwise the run stays blocked with no red field to fix. */
+            materializeInvalidPaths(full, invalidPaths)
+        }
         /* The editor shows every field of the active route plus the shared
          * geometry, so a field the profile did not carry appears as an
          * editable `null` row instead of being invisible. */
-        val complete = completeProfileFields(full, route, fallbackTo)
+        val complete = if (engine.isNative) completeProfileFields(full, route, fallbackTo) else full
         val roots = buildTree(complete, "", baseline, advanced)
-        cache(deviceRelease, buildNativeDocument(deviceRelease, full))
+        cache(deviceRelease, if (engine.isNative) buildNativeDocument(deviceRelease, full) else null)
         return ProfileConfig(
             release = deviceRelease,
             hasProfile = true,
             roots = roots,
-            general = generalFields(full, baseline, route, fallbackTo),
+            general = if (engine.isNative) generalFields(full, baseline, route, fallbackTo) else emptyList(),
             route = route,
             fallbackTo = fallbackTo,
             invalidPaths = invalidPaths,
+            engine = engine.token,
+            h80gt = h80gt,
         )
     }
 
@@ -503,6 +519,9 @@ internal class AndroidProfileConfigController(
     }
 
     override fun nativeDocument(config: ProfileConfig): ByteArray? = synchronized(lock) {
+        /* Only the native engine has a GLK1 document; a specialized engine must
+         * never be able to reach libghostlock.so through this path. */
+        if (!config.usesNativeEngine) return@synchronized null
         if (cachedRelease == config.release) cachedProfile?.toBinary() else null
     }
 

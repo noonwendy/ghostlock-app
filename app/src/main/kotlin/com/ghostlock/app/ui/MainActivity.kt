@@ -1,5 +1,6 @@
 package com.ghostlock.app.ui
 
+import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
@@ -121,6 +122,31 @@ class MainActivity : ComponentActivity() {
             GhostlockEffect.OpenShizuku -> packageManager
                 .getLaunchIntentForPackage(SHIZUKU_PACKAGE)
                 ?.let(::startActivity)
+
+            /* Specialized-engine handoff: the app is in the foreground, so the
+             * manager starts with the module already live and enforcing back on. */
+            is GhostlockEffect.OpenManager -> openManager(effect.packageName)
+        }
+    }
+
+    private fun openManager(packageName: String) {
+        val intent = packageManager.getLaunchIntentForPackage(packageName)
+        if (intent == null) {
+            Toast.makeText(
+                this,
+                getString(R.string.h80gt_manager_open_failed, packageName),
+                Toast.LENGTH_LONG,
+            ).show()
+            return
+        }
+        try {
+            startActivity(intent)
+        } catch (_: ActivityNotFoundException) {
+            Toast.makeText(
+                this,
+                getString(R.string.h80gt_manager_open_failed, packageName),
+                Toast.LENGTH_LONG,
+            ).show()
         }
     }
 

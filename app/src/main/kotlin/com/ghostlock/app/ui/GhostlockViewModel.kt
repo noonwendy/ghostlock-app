@@ -5,6 +5,10 @@ import androidx.core.net.toUri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.ghostlock.app.R
+import com.ghostlock.app.data.h80gt.H80gtIssueCode
+import com.ghostlock.app.data.h80gt.H80gtManager
+import com.ghostlock.app.data.h80gt.H80gtStage
+import com.ghostlock.app.data.h80gt.H80gtStatus
 import com.ghostlock.app.domain.model.CpuPair
 import com.ghostlock.app.domain.model.KernelSnapshot
 import com.ghostlock.app.domain.model.LogTone
@@ -42,6 +46,9 @@ sealed interface GhostlockEffect {
     data class Clipboard(val text: String) : GhostlockEffect
     data class KeepScreenAwake(val enabled: Boolean) : GhostlockEffect
     data object OpenShizuku : GhostlockEffect
+
+    /** Foreground handoff to the KernelSU manager after a successful chain. */
+    data class OpenManager(val packageName: String) : GhostlockEffect
 }
 
 private const val OverwriteSummaryLimit = 12
@@ -89,10 +96,26 @@ class GhostlockViewModel(
         if (initialized) return
         initialized = true
         repository.setShizukuStatusListener { refreshAccessStatus() }
+        /* Live stage events of the specialized chain; the native engine keeps
+         * its own persisted w1..w3 state and never emits these. */
+        repository.setH80gtStageListener { stage, status -> onH80gtStage(stage, status) }
         viewModelScope.launch {
             refreshSnapshot()
             applyRecommendedShizuku()
             maybeSuggestShizukuForW3()
+        }
+    }
+
+    /** Mirrors the UserService's stage events into the visible stage list. */
+    private fun onH80gtStage(stage: String, status: String) {
+        H80gtStage.fromToken(stage) ?: return
+        H80gtStatus.fromToken(status) ?: return
+        mutableState.update { current ->
+            val existing = current.stages.toMutableList()
+            val index = existing.indexOfFirst { it.token == stage }
+            val entry = RunStage(stage, status)
+            if (index >= 0) existing[index] = entry else existing += entry
+            current.copy(stages = existing)
         }
     }
 
@@ -169,6 +192,8 @@ class GhostlockViewModel(
                 activeBuiltinProfile = profileController.activeBuiltinRelease(),
                 activeUserProfile = profileController.activeUserProfile(),
                 customCpuPair = customCpuPairOf(config),
+                engine = config.engine,
+                h80gtTarget = config.h80gt?.let { "MagicOS ${it.firmware}" },
             )
         }
     }
@@ -908,20 +933,90 @@ class GhostlockViewModel(
             return
         }
         val pair = snapshot.cpuPairs.getOrNull(snapshot.selectedCpuPair) ?: return
-        if (!beginOperation()) return
-        send(GhostlockEffect.KeepScreenAwake(true))
-        appendLog("==== start ${if (useShizuku) "Shizuku/V20" else "base"} ====")
-        appendLog("cpu pair: ${snapshot.cpuPairLabels.getOrElse(snapshot.selectedCpuPair) { pair.toString() }}")
-        viewModelScope.launch(Dispatchers.IO) {
-            try {
-                val code = runExploitUseCase(pair, useShizuku, ::appendLog)
-                appendLog(if (code == 0) "result: exploit completed" else "result: exploit failed (exit code=$code)")
-                appendLog("exit code=$code")
-            } finally {
-                endOperation()
-                send(GhostlockEffect.KeepScreenAwake(false))
+        viewModelScope.launch {
+            /* App-side preflight for a specialized engine (null for the native
+             * one). It costs one profile load and refuses before any staging. */
+            val verdict = withContext(Dispatchers.IO) {
+                runCatching { repository.h80gtPreflight() }.getOrNull()
+            }
+            if (verdict != null && !verdict.ok) {
+                val issue = verdict.blockers.first()
+                /* Show the refusal in the sheet as well as in the toast: the
+                 * reason must stay readable after the toast disappears. */
+                if (beginOperation()) {
+                    appendLog("<s> h80gt blocked: ${verdict.blockers.joinToString()}")
+                    endOperation()
+                }
+                send(GhostlockEffect.Toast(blockerRes(issue.code)))
+                return@launch
+            }
+            if (!beginOperation()) return@launch
+            send(GhostlockEffect.KeepScreenAwake(true))
+            appendLog("==== start ${if (useShizuku) "Shizuku/V20" else "base"} ====")
+            appendLog(
+                "cpu pair: ${snapshot.cpuPairLabels.getOrElse(snapshot.selectedCpuPair) { pair.toString() }}",
+            )
+            mutableState.update { it.copy(stages = emptyList()) }
+            withContext(Dispatchers.IO) {
+                try {
+                    val code = runExploitUseCase(pair, useShizuku, ::appendLog)
+                    appendLog(if (code == 0) "result: exploit completed" else "result: exploit failed (exit code=$code)")
+                    appendLog("exit code=$code")
+                    if (code == 0) handOffToManager()
+                } finally {
+                    endOperation()
+                    send(GhostlockEffect.KeepScreenAwake(false))
+                }
             }
         }
+    }
+
+    /**
+     * After a successful specialized run the manager is opened from the app
+     * foreground. A missing or version-mismatched manager is reported with the
+     * reason instead of being swapped for another KernelSU branch.
+     */
+    private fun handOffToManager() {
+        when (val decision = repository.consumeH80gtHandoff()) {
+            is H80gtManager.Decision.Open -> {
+                appendLog("<k> opening manager ${decision.packageName}")
+                onH80gtStage(H80gtStage.HANDOFF.token, H80gtStatus.COMPLETED.token)
+                send(GhostlockEffect.OpenManager(decision.packageName))
+            }
+
+            is H80gtManager.Decision.Blocked -> {
+                appendLog("<s> manager handoff blocked: ${decision.issue}")
+                onH80gtStage(H80gtStage.HANDOFF.token, H80gtStatus.FAILED.token)
+                send(GhostlockEffect.Toast(managerBlockedRes(decision.issue.code)))
+            }
+
+            null -> Unit
+        }
+    }
+
+    private fun blockerRes(code: H80gtIssueCode): Int = when (code) {
+        H80gtIssueCode.SHIZUKU_NOT_READY -> R.string.run_blocked_shizuku
+        H80gtIssueCode.PREVIOUS_RUN_NEEDS_REBOOT -> R.string.h80gt_block_reboot
+        H80gtIssueCode.PAYLOAD_MISSING, H80gtIssueCode.PAYLOAD_INCOMPLETE ->
+            R.string.h80gt_block_payload
+
+        H80gtIssueCode.DEVICE_MISMATCH, H80gtIssueCode.RELEASE_MISMATCH,
+        H80gtIssueCode.FINGERPRINT_MISMATCH, H80gtIssueCode.PAYLOAD_TARGET_MISMATCH,
+            -> R.string.h80gt_block_target
+
+        H80gtIssueCode.MANAGER_MISSING -> R.string.h80gt_block_manager
+        H80gtIssueCode.MANAGER_VERSION_MISMATCH -> R.string.h80gt_block_manager_version
+        H80gtIssueCode.MODULE_ALREADY_LOADED -> R.string.h80gt_block_module_loaded
+        H80gtIssueCode.CHAIN_ALIVE -> R.string.h80gt_block_chain_alive
+        H80gtIssueCode.SELINUX_NOT_ENFORCING -> R.string.h80gt_block_selinux
+        H80gtIssueCode.LOW_STORAGE -> R.string.h80gt_block_storage
+        H80gtIssueCode.ENGINE_UNKNOWN, H80gtIssueCode.PROFILE_INVALID ->
+            R.string.profile_invalid
+    }
+
+    private fun managerBlockedRes(code: H80gtIssueCode): Int = when (code) {
+        H80gtIssueCode.MANAGER_VERSION_MISMATCH -> R.string.h80gt_manager_version_blocked
+        else -> R.string.h80gt_manager_missing_blocked
     }
 
     fun onCloseExecutionSheet() {

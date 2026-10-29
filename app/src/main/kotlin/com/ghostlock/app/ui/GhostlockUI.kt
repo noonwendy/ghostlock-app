@@ -60,6 +60,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.ghostlock.app.R
 import com.ghostlock.app.data.ManagerScanner
+import com.ghostlock.app.data.h80gt.H80gtStage
+import com.ghostlock.app.data.h80gt.H80gtStatus
 import com.ghostlock.app.domain.model.CpuPair
 import com.ghostlock.app.domain.model.ExecutionFieldValue
 import com.ghostlock.app.domain.model.ProfileFieldNode
@@ -177,7 +179,16 @@ data class GhostlockUiState(
     val managerCandidates: List<ManagerScanner.Candidate> = emptyList(),
     val selectedManagerPackage: String? = null,
     val managerPickerVisible: Boolean = false,
+    /** Execution engine of the active profile: "native" or "h80gt". */
+    val engine: String = "native",
+    /** Exact target summary of a specialized engine; null for the native one. */
+    val h80gtTarget: String? = null,
+    /** Live stage list of a specialized run, in arrival order. */
+    val stages: List<RunStage> = emptyList(),
 )
+
+/** One stage of the specialized chain, as reported by the Shizuku service. */
+data class RunStage(val token: String, val status: String)
 
 enum class DialogType { NONE, LIST, INPUT, CONFIRM, NOTICE }
 
@@ -465,15 +476,81 @@ private fun GhostlockExecutionSheet(
             }
         },
         content = {
-            LogPanel(
-                lines = state.logLines,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 240.dp, max = 520.dp)
-                    .navigationBarsPadding(),
-            )
+            Column(modifier = Modifier.fillMaxWidth()) {
+                if (state.stages.isNotEmpty()) {
+                    StageProgress(stages = state.stages, target = state.h80gtTarget)
+                }
+                LogPanel(
+                    lines = state.logLines,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 240.dp, max = 520.dp)
+                        .navigationBarsPadding(),
+                )
+            }
         },
     )
+}
+
+/**
+ * The specialized chain's stage list: the user must be able to see which stage
+ * is running, which one failed, and whether a reboot is required, without
+ * reading the log.
+ */
+@Composable
+private fun StageProgress(stages: List<RunStage>, target: String?) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+    ) {
+        if (target != null) {
+            Text(
+                text = stringResource(R.string.h80gt_target_label) + ": " + target,
+                color = MiuixTheme.colorScheme.onBackgroundVariant,
+                modifier = Modifier.padding(bottom = 6.dp),
+            )
+        }
+        for (stage in H80gtStage.Order) {
+            val reported = stages.firstOrNull { it.token == stage.token } ?: continue
+            val color = when (reported.status) {
+                H80gtStatus.COMPLETED.token -> Color(0xFF4CAF50)
+                H80gtStatus.FAILED.token -> Color(0xFFFF6B6B)
+                H80gtStatus.IN_PROGRESS.token -> MiuixTheme.colorScheme.primary
+                else -> MiuixTheme.colorScheme.onBackgroundVariant
+            }
+            Row(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+                Text(
+                    text = stringResource(stageLabelRes(stage.token)),
+                    color = MiuixTheme.colorScheme.onBackground,
+                )
+                Spacer(modifier = Modifier.weight(1f))
+                Text(
+                    text = stringResource(stageStatusRes(reported.status)),
+                    color = color,
+                )
+            }
+        }
+    }
+}
+
+private fun stageLabelRes(token: String): Int = when (token) {
+    H80gtStage.PREFLIGHT.token -> R.string.h80gt_stage_preflight
+    H80gtStage.STAGE.token -> R.string.h80gt_stage_stage
+    H80gtStage.LAUNCH.token -> R.string.h80gt_stage_launch
+    H80gtStage.EXPLOIT.token -> R.string.h80gt_stage_exploit
+    H80gtStage.MODULE.token -> R.string.h80gt_stage_module
+    H80gtStage.USERSPACE.token -> R.string.h80gt_stage_userspace
+    H80gtStage.RESTORE.token -> R.string.h80gt_stage_restore
+    H80gtStage.HANDOFF.token -> R.string.h80gt_stage_handoff
+    else -> R.string.h80gt_stage_stage
+}
+
+private fun stageStatusRes(status: String): Int = when (status) {
+    H80gtStatus.COMPLETED.token -> R.string.h80gt_stage_completed
+    H80gtStatus.FAILED.token -> R.string.h80gt_stage_failed
+    H80gtStatus.IN_PROGRESS.token -> R.string.h80gt_stage_running
+    else -> R.string.h80gt_stage_pending
 }
 
 @Composable

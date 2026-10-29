@@ -160,3 +160,113 @@ tasks.register<Copy>("prepareGhostlockExtractJniLibs") {
     into("app/src/main/jniLibs/arm64-v8a")
     rename { "libextract.so" }
 }
+
+/* ---- H80GT specialized payload (engine = "h80gt") -------------------------
+ * The v0.3.1 release bundle is the source of truth; the bytes are staged into
+ * app/src/main/assets/h80gt/ (never committed) and every file is hash-verified
+ * against assets/h80gt/payloads.conf by :profile-core:verifyH80gtPayload.
+ *
+ * Only the exploit is per firmware; the firmware-independent set is staged once
+ * under shared/. Selection is by kernel string, as in GhostLock-H80GT's own
+ * manifest, so no device-unique data is staged or compared.
+ *
+ *   -Pghostlock.h80gt=<dir>  directory containing `ghostlock/` (default ../release/bundle)
+ *   -Pghostlock.h80gt=off    stage nothing; the app refuses engine = h80gt at preflight
+ */
+val h80gtFirmwares = listOf(
+    "8.0.0.128",
+    "8.0.0.160",
+    "9.0.0.157",
+    "9.0.0.200SP1",
+    "9.0.0.220SP2",
+    "9.0.0.230",
+)
+val h80gtSharedSources = linkedMapOf(
+    "kernelsu.ko" to "kernelsu.ko",
+    "load_ko" to "load_ko",
+    "kmsg_dumper" to "kmsg_dumper",
+    "magiskpolicy" to "magiskpolicy",
+    "ksud" to "ksud",
+    "ksu_rules" to "ksu_rules",
+    "ksu_loader.tmpl" to "ksu_loader.tmpl",
+)
+val h80gtDisabled: Boolean =
+    (findProperty("ghostlock.h80gt") as String?)?.equals("off", ignoreCase = true) == true
+val h80gtBundleDir: File? = run {
+    if (h80gtDisabled) return@run null
+    (findProperty("ghostlock.h80gt") as String?)?.takeIf { it.isNotBlank() }?.let { return@run File(it) }
+    /* The fork ships patched exploits: prefer the regenerated bundle when the
+     * workspace has one, fall back to the pinned upstream bundle. */
+    File(rootDir.parentFile, "release/bundle-patched").takeIf { it.isDirectory }
+        ?: File(rootDir.parentFile, "release/bundle").takeIf { it.isDirectory }
+}
+val h80gtAssetsDir = layout.projectDirectory.dir("app/src/main/assets/h80gt").asFile
+/* Fork-built exploits are committed; the shared set still comes from the bundle. */
+val h80gtCommittedExploitsDir = layout.projectDirectory.dir("h80gt/exploits").asFile
+
+tasks.register("prepareH80gtPayload") {
+    description = "Stage the H80GT specialized payload from the pinned release bundle"
+    /* Every value the action reads is captured as a plain local: the
+     * configuration cache cannot serialise references to the build script. */
+    val disabled = h80gtDisabled
+    val bundle = h80gtBundleDir
+    val assets = h80gtAssetsDir
+    val committedExploits = h80gtCommittedExploitsDir
+    val firmwares = h80gtFirmwares.toList()
+    val sharedSources = LinkedHashMap(h80gtSharedSources)
+    inputs.property("disabled", disabled)
+    inputs.property("firmwares", firmwares.size)
+    inputs.file(File(assets, "payloads.conf")).optional()
+    if (bundle != null) inputs.dir(File(bundle, "ghostlock"))
+    inputs.dir(committedExploits)
+    outputs.dir(assets)
+    doLast {
+        val payloadRoot = File(assets, "payload")
+        val sharedDir = File(assets, "shared")
+        /* Text artifacts must be LF: a CRLF checkout makes /system/bin/sh
+         * reject the rendered loader. */
+        val textNames = setOf("ksu_rules", "ksu_loader.tmpl")
+        fun stage(source: File, target: File) {
+            target.parentFile?.mkdirs()
+            if (source.name in textNames) {
+                target.writeText(source.readText().replace("\r\n", "\n"))
+            } else {
+                source.copyTo(target, overwrite = true)
+            }
+        }
+        payloadRoot.deleteRecursively()
+        sharedDir.deleteRecursively()
+        /* Legacy single-payload layout from batch 1: never ship two copies. */
+        File(assets, "ksu_loader.tmpl").delete()
+        if (disabled) {
+            logger.lifecycle("prepareH80gtPayload: disabled (-Pghostlock.h80gt=off); engine=h80gt will refuse")
+            return@doLast
+        }
+        require(bundle != null) {
+            "H80GT payload bundle not found. Pass -Pghostlock.h80gt=<dir containing ghostlock/> " +
+                "(default ../release/bundle) or -Pghostlock.h80gt=off."
+        }
+        val root = File(bundle, "ghostlock")
+        require(root.isDirectory) { "not an H80GT release bundle (missing ghostlock/): $root" }
+        for ((sourceName, targetName) in sharedSources) {
+            val source = File(root, sourceName)
+            require(source.isFile) { "missing $sourceName in the H80GT bundle ($root)" }
+            stage(source, File(sharedDir, targetName))
+            logger.lifecycle("prepareH80gtPayload: $sourceName -> ${File(sharedDir, targetName).absolutePath}")
+        }
+        for (firmware in firmwares) {
+            /* The fork rebuilds these six exploits; they are committed and take
+             * precedence over the bundle's copies. The shared set has no
+             * committed copy and still comes from the pinned bundle. */
+            val committed = File(committedExploits, "$firmware/exploit")
+            val source = if (committed.isFile) committed else File(root, "exploits/$firmware/exploit")
+            require(source.isFile) {
+                "missing h80gt/exploits/$firmware/exploit (committed) and " +
+                    "exploits/$firmware/exploit in the H80GT bundle ($root)"
+            }
+            val target = File(payloadRoot, "annap-AGT-AN00_$firmware/exploit")
+            stage(source, target)
+            logger.lifecycle("prepareH80gtPayload: ${source.path} -> ${target.absolutePath}")
+        }
+    }
+}

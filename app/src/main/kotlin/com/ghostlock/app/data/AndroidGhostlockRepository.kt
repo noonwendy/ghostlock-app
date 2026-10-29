@@ -4,12 +4,27 @@ import android.annotation.SuppressLint
 import android.content.ContentValues
 import android.content.Context
 import android.os.Build
+import android.os.SystemClock
 import android.provider.MediaStore
 import androidx.core.content.edit
 import androidx.core.net.toUri
 import com.ghostlock.app.BuildConfig
 import com.ghostlock.app.BuildInfo
 import com.ghostlock.app.data.ManagerScanner
+import com.ghostlock.app.data.h80gt.H80gtBootClock
+import com.ghostlock.app.data.h80gt.H80gtDeviceFacts
+import com.ghostlock.app.data.h80gt.H80gtIssue
+import com.ghostlock.app.data.h80gt.H80gtIssueCode
+import com.ghostlock.app.data.h80gt.H80gtManager
+import com.ghostlock.app.data.h80gt.H80gtOutcome
+import com.ghostlock.app.data.h80gt.H80gtPayload
+import com.ghostlock.app.data.h80gt.H80gtPayloadCatalog
+import com.ghostlock.app.data.h80gt.H80gtPreflight
+import com.ghostlock.app.data.h80gt.H80gtRunRecord
+import com.ghostlock.app.data.h80gt.H80gtRunStateCodec
+import com.ghostlock.app.data.h80gt.H80gtStage
+import com.ghostlock.app.data.h80gt.H80gtStatus
+import com.ghostlock.app.data.h80gt.H80gtVerdict
 import com.ghostlock.app.domain.model.CpuPair
 import com.ghostlock.app.domain.model.DebugSettings
 import com.ghostlock.app.domain.model.KernelSnapshot
@@ -18,6 +33,7 @@ import com.ghostlock.app.data.ota.OtaPayloadExtractor
 import com.ghostlock.app.domain.model.OffsetImportResult
 import com.ghostlock.app.domain.model.ParseResult
 import com.ghostlock.app.domain.model.ProfileConfig
+import com.ghostlock.app.domain.model.ShizukuStatus
 import com.ghostlock.app.domain.model.UserProfileFile
 import com.ghostlock.app.domain.repository.GhostlockRepository
 import com.ghostlock.app.domain.repository.ProfileConfigController
@@ -31,6 +47,8 @@ import java.io.FileOutputStream
 import java.io.IOException
 import java.io.RandomAccessFile
 import java.nio.charset.StandardCharsets
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
@@ -64,6 +82,9 @@ class AndroidGhostlockRepository(context: Context) : GhostlockRepository {
          * file so a kernel panic still leaves the last in_progress step for the
          * next launch to read. HOCON/JSON. */
         const val RunStateFileName = ".ghostlock_run_state.json"
+
+        /* Specialized-engine run record (stage statuses, outcome, reboot flag). */
+        const val H80gtRecordFileName = ".ghostlock_h80gt_run.json"
         const val StatusMarker = "\u001eGLK_STATUS"
         const val StatusAck = "\u001eGLK_STATUS_ACK\n"
         const val StatusDisabled = "\u001eGLK_STATUS_DISABLED"
@@ -408,13 +429,31 @@ class AndroidGhostlockRepository(context: Context) : GhostlockRepository {
 
     override suspend fun runExploit(pair: CpuPair, onLog: (String) -> Unit): Int =
         withDebugAttackLog("direct", onLog) { archivedLog, debugDir, writeSidecar ->
-            runExploitBinary(pair, "libghostlock.so", archivedLog, debugDir, writeSidecar)
+            val release = System.getProperty("os.version", "").orEmpty()
+            val config = profileController.load(release, pair)
+            if (config.hasProfile && !config.usesNativeEngine) {
+                /* The specialized chain needs the shell identity (Shizuku); the
+                 * app process is untrusted_app with a seccomp filter. */
+                archivedLog(
+                    "<s> error: the ${config.engine} engine requires Shizuku; " +
+                        "enable it and run again",
+                )
+                1
+            } else {
+                runExploitBinary(pair, "libghostlock.so", archivedLog, debugDir, writeSidecar)
+            }
         }
 
     override suspend fun runExploitWithShizuku(pair: CpuPair, onLog: (String) -> Unit): Int {
+        val release = System.getProperty("os.version", "").orEmpty()
+        val engineConfig = profileController.load(release, pair)
+        if (engineConfig.hasProfile && !engineConfig.usesNativeEngine) {
+            return withDebugAttackLog("h80gt", onLog) { archivedLog, _, writeSidecar ->
+                runH80gt(engineConfig, pair, archivedLog, writeSidecar)
+            }
+        }
         return withDebugAttackLog("shizuku", onLog) { archivedLog, debugDir, writeSidecar ->
             archivedLog("<s> resolving profile")
-            val release = System.getProperty("os.version", "").orEmpty()
             val config = profileController.load(release, pair)
             val profileBlob = profileController.nativeDocument(config)
             archivedLog(
@@ -455,6 +494,250 @@ class AndroidGhostlockRepository(context: Context) : GhostlockRepository {
                 }
             }
         }
+    }
+
+    /* --- specialized engine (engine = "h80gt") ------------------------------
+     * The app decides whether the chain is worth starting and keeps the
+     * per-run record; the Shizuku UserService is authoritative for the device
+     * state and owns staging/launch/supervision (see H80gtExecutor). */
+
+    private val h80gtLock = Any()
+    private val h80gtRecordFile get() = File(filesDir, H80gtRecordFileName)
+    private var h80gtStageListener: ((String, String) -> Unit)? = null
+    private var h80gtHandoff: H80gtManager.Decision? = null
+    private var h80gtRecordCache: H80gtRunRecord? = null
+    private var h80gtRecordLoaded = false
+
+    override suspend fun h80gtPreflight(): H80gtVerdict? = withContext(Dispatchers.IO) {
+        val release = System.getProperty("os.version", "").orEmpty()
+        val pair = cpuPairs.getOrNull(selectedCpuPair) ?: CpuPair(0, 1)
+        val config = runCatching { profileController.load(release, pair) }.getOrNull()
+            ?: return@withContext null
+        if (!config.hasProfile || config.usesNativeEngine) return@withContext null
+        val spec = config.h80gt ?: return@withContext H80gtVerdict(
+            blockers = listOf(H80gtIssue(H80gtIssueCode.PROFILE_INVALID, "h80gt section")),
+        )
+        val payload = bundledPayload(spec.payload)
+        H80gtPreflight.appSide(
+            spec = spec,
+            payload = payload,
+            device = deviceFacts(),
+            manager = resolveManagerCandidate(payload),
+            previousRunNeedsReboot = previousRunNeedsReboot(),
+            shizukuReady = shizukuRunner.status() == ShizukuStatus.READY,
+        )
+    }
+
+    override suspend fun lastH80gtRun(): H80gtRunRecord? = withContext(Dispatchers.IO) { h80gtRecord() }
+
+    override fun setH80gtStageListener(listener: ((stage: String, status: String) -> Unit)?) {
+        h80gtStageListener = listener
+    }
+
+    override fun consumeH80gtHandoff(): H80gtManager.Decision? =
+        h80gtHandoff.also { h80gtHandoff = null }
+
+    private fun bundledPayload(id: String): H80gtPayload? = runCatching {
+        H80gtPayloadCatalog.fromApk(File(appContext.applicationInfo.sourceDir)).payload(id)
+    }.getOrNull()
+
+    private fun deviceFacts(): H80gtDeviceFacts = H80gtDeviceFacts(
+        model = Build.MODEL.orEmpty(),
+        fingerprint = Build.FINGERPRINT.orEmpty(),
+        release = System.getProperty("os.version", "").orEmpty(),
+    )
+
+    /**
+     * The user's choice first, then the payload's default. Only an installed
+     * package yields a candidate; "not installed" must stay distinguishable
+     * from "installed with an unknown version".
+     */
+    private fun resolveManagerCandidate(payload: H80gtPayload?): H80gtManager.Candidate? {
+        val packageName = selectedManagerPackage()?.takeIf { it.isNotBlank() }
+            ?: payload?.managerPackage
+            ?: return null
+        return runCatching {
+            val info = appContext.packageManager.getPackageInfo(packageName, 0)
+            H80gtManager.Candidate(packageName, info.versionName)
+        }.getOrNull()
+    }
+
+    private fun currentBootInstant(): Long =
+        H80gtBootClock.bootInstant(System.currentTimeMillis(), SystemClock.elapsedRealtime())
+
+    private fun h80gtRecord(): H80gtRunRecord? = synchronized(h80gtLock) {
+        if (!h80gtRecordLoaded) {
+            h80gtRecordCache = runCatching {
+                h80gtRecordFile.takeIf { it.isFile }?.readText()?.let(H80gtRunStateCodec::decode)
+            }.getOrNull()
+            h80gtRecordLoaded = true
+        }
+        h80gtRecordCache
+    }
+
+    private fun persistH80gtRecord(record: H80gtRunRecord) {
+        synchronized(h80gtLock) {
+            h80gtRecordCache = record
+            h80gtRecordLoaded = true
+            runCatching {
+                h80gtRecordFile.writeText(H80gtRunStateCodec.encode(record))
+            }
+        }
+    }
+
+    /**
+     * A failed run needs a reboot before the next attempt: the exploit leaves
+     * the boot_id ctl_table pointer redirected unless the module restored it.
+     * The record's boot instant tells "same boot" from "rebooted" without
+     * touching the hijacked boot_id itself.
+     */
+    private fun previousRunNeedsReboot(): Boolean {
+        val record = h80gtRecord() ?: return false
+        if (!record.needsReboot && record.outcome != H80gtOutcome.RUNNING) return false
+        return !H80gtBootClock.rebootedSince(record.bootInstant, currentBootInstant())
+    }
+
+    /** Applies one stage event from the UserService to the persisted record. */
+    private fun applyH80gtStatus(stageToken: String, statusToken: String) {
+        synchronized(h80gtLock) {
+            val current = h80gtRecordCache ?: return@synchronized
+            val updated = when (stageToken) {
+                "outcome" -> current.copy(
+                    outcome = H80gtOutcome.fromToken(statusToken) ?: current.outcome,
+                )
+
+                "reboot" -> current.copy(needsReboot = statusToken == "required")
+
+                else -> {
+                    val stage = H80gtStage.fromToken(stageToken) ?: return@synchronized
+                    val status = H80gtStatus.fromToken(statusToken) ?: return@synchronized
+                    current.copy(stages = current.stages + (stage to status))
+                }
+            }
+            h80gtRecordCache = updated
+            runCatching { h80gtRecordFile.writeText(H80gtRunStateCodec.encode(updated)) }
+        }
+        h80gtStageListener?.invoke(stageToken, statusToken)
+    }
+
+    private suspend fun runH80gt(
+        config: ProfileConfig,
+        pair: CpuPair,
+        archivedLog: (String) -> Unit,
+        writeSidecar: (String, ByteArray) -> Boolean,
+    ): Int {
+        val spec = config.h80gt
+        if (spec == null) {
+            archivedLog("<s> error: this profile has no h80gt target section")
+            return 1
+        }
+        val payload = bundledPayload(spec.payload)
+        archivedLog(
+            "<k> H80GT engine: payload=${spec.payload} firmware=${spec.firmware} " +
+                "device=${spec.device ?: "any"} manager=${spec.managerVersion}",
+        )
+        payload?.let { loaded ->
+            archivedLog("<k> H80GT payload: ${loaded.artifacts.size} artifacts, source=${loaded.source}")
+            writeSidecar("payload.conf", payloadSummary(loaded).toByteArray(StandardCharsets.UTF_8))
+        }
+        runCatching { profileController.renderResolvedForDebug(config.release, pair) }
+            .getOrNull()
+            ?.let { writeSidecar("profile.conf", it.toByteArray(StandardCharsets.UTF_8)) }
+
+        val verdict = H80gtPreflight.appSide(
+            spec = spec,
+            payload = payload,
+            device = deviceFacts(),
+            manager = resolveManagerCandidate(payload),
+            previousRunNeedsReboot = previousRunNeedsReboot(),
+            shizukuReady = shizukuRunner.status() == ShizukuStatus.READY,
+        )
+        verdict.warnings.forEach { archivedLog("<k> warning: $it") }
+        val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.ROOT).format(Date())
+        if (!verdict.ok) {
+            verdict.blockers.forEach { archivedLog("<s> refused: $it") }
+            persistH80gtRecord(
+                H80gtRunRecord(
+                    stamp = stamp,
+                    startedAt = System.currentTimeMillis(),
+                    bootInstant = currentBootInstant(),
+                    outcome = H80gtOutcome.REFUSED,
+                    failedStage = H80gtStage.PREFLIGHT,
+                    needsReboot = false,
+                    reason = verdict.describe(),
+                ),
+            )
+            archivedLog("result: h80gt refused before staging")
+            return 1
+        }
+
+        persistH80gtRecord(
+            H80gtRunStateCodec.initial(stamp, System.currentTimeMillis(), currentBootInstant()),
+        )
+        archivedLog("<k> H80GT run $stamp")
+        val code = shizukuRunner.runH80gt(
+            spec.payload,
+            resolveManagerCandidate(payload)?.packageName,
+            archivedLog,
+        ) { stage, status -> applyH80gtStatus(stage, status) }
+
+        val finished = h80gtRecord()
+        val needsReboot = finished?.needsReboot ?: (code != 0)
+        if (finished != null && finished.outcome == H80gtOutcome.RUNNING) {
+            /* The supervisor ended without its final event (connection drop or
+             * app death). The exit code is the only remaining evidence. */
+            persistH80gtRecord(
+                finished.copy(
+                    outcome = if (code == 0) H80gtOutcome.READY else H80gtOutcome.FAILED,
+                    needsReboot = needsReboot,
+                    reason = "supervisor returned $code",
+                ),
+            )
+        }
+        if (code == 0 && payload != null) {
+            val decision = H80gtManager.decide(
+                selectedManagerPackage(),
+                payload,
+                resolveManagerCandidate(payload),
+            )
+            h80gtHandoff = decision
+            when (decision) {
+                is H80gtManager.Decision.Open ->
+                    archivedLog("<k> manager handoff: ${decision.packageName}")
+
+                is H80gtManager.Decision.Blocked ->
+                    archivedLog("<s> manager handoff blocked: ${decision.issue}")
+            }
+        } else {
+            h80gtHandoff = null
+        }
+        archivedLog(
+            "result: h80gt ${if (code == 0) "ready" else "failed"} " +
+                "stage=${h80gtRecord()?.failedStage?.token ?: "-"} reboot=$needsReboot",
+        )
+        return code
+    }
+
+    /** The sidecar that records what was supposed to run, and from where. */
+    private fun payloadSummary(payload: H80gtPayload): String = buildString {
+        appendLine("id = \"${payload.id}\"")
+        payload.device?.let { appendLine("device = \"$it\"") }
+        appendLine("release = \"${payload.release}\"")
+        appendLine("firmware = \"${payload.firmware}\"")
+        payload.fingerprint?.let { appendLine("fingerprint = \"$it\"") }
+        appendLine("status = \"${payload.status}\"")
+        appendLine("source = \"${payload.source}\"")
+        appendLine("bundle_sha256 = \"${payload.bundleSha256}\"")
+        appendLine("manager = \"${payload.managerPackage} ${payload.managerVersion}\"")
+        appendLine("artifacts = [")
+        for (artifact in payload.artifacts) {
+            appendLine(
+                "  { name = \"${artifact.name}\" role = \"${artifact.role}\" " +
+                    "size = ${artifact.size} sha256 = \"${artifact.sha256}\" " +
+                    "license = \"${artifact.license}\" source = \"${artifact.source}\" }",
+            )
+        }
+        appendLine("]")
     }
 
     /* --- attack step status ------------------------------------------------

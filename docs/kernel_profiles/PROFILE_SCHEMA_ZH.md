@@ -85,6 +85,46 @@ offset { init_task = 34464384, init_cred = 34538824 }
 | `fallback` | object | 回退声明（`to` + 可选 `route` 分支），见第 3 节 |
 | 几何字段 | object/int | 按命名空间分组：`task_struct` / `cred` / `offset` / `kernelsnitch`。当前路由的全字段与公共几何必须全部出现；无法提供的值写显式 `null`（不要用 `0` 占位）；非当前路由的分支省略，声明的 fallback 除外 |
 | `execution` | object | 调优参数（advisory）。通用项来自 `execution-tuning.conf`，路由项来自 `execution-<route>.conf`；两者由 resolver 作为 preset 加载，设备 profile 不 include。只写差异 |
+| `engine` | string | 可选执行引擎：`native`（缺省）或 `h80gt`。仅存在于 Kotlin 侧，不进入 GLK1 文档。见 2.1 节 |
+| `h80gt` | object | `engine = "h80gt"` 时必填，否则禁止出现。专用链的精确目标与载荷，见 2.1 节 |
+
+### 2.1 专用执行引擎（`engine` / `h80gt`）
+
+`engine` 决定用哪个实现运行该 profile。`native` 保持 GLK1 + `libghostlock.so` 管线字节不变；
+`h80gt` 通过 Shizuku UserService 运行荣耀 80 GT 专用链（按固件编译的 exploit + 该项目权威
+KernelSU loader）。
+
+```hocon
+release = "5.10.236-android12-9-gd671cf8c2b02"   # 唯一的硬性匹配键
+schema_version = 1
+engine = "h80gt"
+kernel_major = 5
+recommend_shizuku = 1
+
+h80gt {
+  payload = "annap-AGT-AN00_9.0.0.230"   # assets/h80gt/payloads.conf 里的 id
+  firmware = "9.0.0.230"
+  manager_version = "3.3.0"              # 随包模块编译所用的 KernelSU 版本
+  # 可选收紧项；随包 profile 都不声明
+  # device = "AGT-AN00"                  # Build.MODEL，仅在声明时比较
+  # fingerprint = "构建指纹"             # 仅在声明时比较
+}
+```
+
+| 规则 | 结果 |
+|---|---|
+| `engine` 缺省或 `native` | native 规则不变；`h80gt` 必须缺席 |
+| `engine` 为其他任何值 | 校验在 `engine` 上报错，运行被拒绝 |
+| `engine = "h80gt"` | `route`、`fallback`、`task_struct`、`cred`、`offset`、`kernelsnitch`、`kernel_phys_*`、`execution` 必须缺席；该 profile **不产生** GLK1 文档 |
+| `engine = "h80gt"` | `payload`、`firmware`、`manager_version` 必填且非空；`device`、`fingerprint` 可选；`recommend_shizuku` 必须为 `1`（链需要 shell 身份） |
+| `engine = "h80gt"` | `release` 与 `firmware` 必须与 `assets/h80gt/payloads.conf` 的载荷条目一致；已声明的 `device`/`fingerprint`（任一侧）必须与设备一致。不符即在搬运前拒绝运行 |
+
+选择只依据内核串（`uname -r`）——与 GhostLock-H80GT 自己的规则相同。不需要也不携带序列号、账号或
+任何设备唯一字符串；可选项只为需要更严格绑定的用户准备。
+
+应用独立核对设备（`uname -r`，仅在声明时再比机型/指纹）、profile 与载荷目录，Shizuku 服务再核对
+一次并作为权威侧。`payloads.conf` 为每个产物固定大小、SHA-256、许可证与来源；打包字节不符时拒绝
+运行而不是执行。
 
 ## 3. 路由（route）机制
 

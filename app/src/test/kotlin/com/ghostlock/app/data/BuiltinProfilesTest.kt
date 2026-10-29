@@ -6,6 +6,7 @@ import com.ghostlock.app.domain.model.CpuPair
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -67,6 +68,21 @@ class BuiltinProfilesTest {
                     emptySet<String>(),
                     config.invalidPaths,
                 )
+                if (!config.usesNativeEngine) {
+                    /* A specialized engine ships its own payload and must not
+                     * produce a native document or native editor fields. */
+                    assertEquals("h80gt", config.engine)
+                    assertNotNull("${entry.release}: missing h80gt target", config.h80gt)
+                    assertNull(
+                        "${entry.release}: specialized engine produced a native document",
+                        controller.nativeDocument(config),
+                    )
+                    assertTrue(
+                        "${entry.release}: native fields leaked into the general list",
+                        config.general.isEmpty(),
+                    )
+                    continue
+                }
                 val route = config.route
                 assertNotNull("${entry.release}: route unresolved", route)
 
@@ -120,6 +136,7 @@ class BuiltinProfilesTest {
             )
             for (entry in builtinEntries()) {
                 val config = controller.load(entry.release, pair)
+                if (!config.usesNativeEngine) continue
                 val paths = leafPaths(config.roots)
                 assertTrue("${entry.release}: kernel_phys_load missing", "kernel_phys_load" in paths)
                 for (field in listOf(
